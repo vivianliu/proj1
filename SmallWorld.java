@@ -53,6 +53,10 @@ public class SmallWorld {
 
     public static boolean allTraversed;
 
+    private static final boolean useDebugData = false;
+    private static boolean debugDataSet = false;
+    private static final boolean debug = false;
+
     // Example writable type
     public static class EValue implements Writable {
         public ValueUse use;
@@ -94,34 +98,60 @@ public class SmallWorld {
        You will need to modify this to propagate all edges, but it is 
        included to demonstate how to read & use the denom argument.         */
     public static class LoaderMap extends Mapper<LongWritable, LongWritable, LongWritable, LongWritable> {
-
-        /* Will need to modify to not lose any edges. */
+        /* Will need to modify to not loose any edges. */
         @Override
         public void map(LongWritable key, LongWritable value, Context context)
                 throws IOException, InterruptedException {
-
+	    StringBuilder toReturn = new StringBuilder();
+	    if (useDebugData) {
+		if (debugDataSet)
+		    return;
+		debugDataSet = true;
+		class link {
+		    public int src;
+		    public int dest;
+		    public link(int s, int d) {
+			src = s;
+			dest = d;
+		    }
+		};
+		link[] debugList = new link[12];
+		debugList[0] = new link(1, 0);
+		debugList[1] = new link(4, 1);
+		debugList[2] = new link(1, 4);
+		debugList[3] = new link(4, 7);
+		debugList[4] = new link(1, 7);
+		debugList[5] = new link(6, 0);
+		debugList[6] = new link(7, 1);
+		debugList[7] = new link(6, 7);
+		debugList[8] = new link(7, 4);
+		debugList[9] = new link(7, 6);
+		debugList[10] = new link(0, 6);
+		debugList[11] = new link(5, 4);
+		for (int x = 0; x < debugList.length; x++) {
+		    System.out.println("==== Loadermap " + debugList[x].src + " " + debugList[x].dest);
+		    context.write(new LongWritable(debugList[x].src), new LongWritable(debugList[x].dest));
+		    context.getCounter(ValueUse.EDGE).increment(1);
+		}
+		StartNodes.add (0L);
+		StartNodes.add (4L);
+		return;
+	    }
+	    if (debug)
+		System.out.println("==== Loadermap " + key + " " + value);
 	    context.write(key, value);
-            // Example of using a counter (counter tagged by EDGE)
-            context.getCounter(ValueUse.EDGE).increment(1);
+	    // Example of using a counter (counter tagged by EDGE)
+	    context.getCounter(ValueUse.EDGE).increment(1);
         }
     }
 
     public static class LoaderReduce extends Reducer<LongWritable, LongWritable, LongWritable, Text> {
-        /** Actual reduce function.
-         * 
-         * @param key Word.
-         * @param values Values for this word (partial counts).
-         * @param context ReducerContext object for accessing output,
-         *                configuration information, etc.
-         */
+        public static long denom;
 
         /* Setup is called automatically once per map task. This will
            read denom in from the DistributedCache, and it will be
            available to each call of map later on via the instance
            variable.                                                  */
-
-	public long denom;
-
         @Override
         public void setup(Context context) {
             try {
@@ -140,7 +170,13 @@ public class SmallWorld {
             }
         }
 
-
+        /** Actual reduce function.
+         * 
+         * @param key Word.
+         * @param values Values for this word (partial counts).
+         * @param context ReducerContext object for accessing output,
+         *                configuration information, etc.
+         */
         @Override 
         public void reduce(LongWritable key, Iterable<LongWritable> values,
 			   Context context)
@@ -148,12 +184,9 @@ public class SmallWorld {
 	    StringBuilder toReturn = new StringBuilder();
 	    boolean first = true;
 
-	    long keyValue = key.get();
-            // Send node forward only if part of random subset
-            if (Math.random() < 1.0/denom) {
-		StartNodes.add (keyValue);
+            if (!useDebugData && Math.random() < 1.0/denom) {
+		StartNodes.add (key.get());
             }
-
 	    // Propagate all nodes to BFS mapper.  Append distance from start
 	    // and mark for traversal.
 	    for (LongWritable value : values) {
@@ -168,8 +201,8 @@ public class SmallWorld {
 		toReturn.append(" T,0,");
 		toReturn.append(key.get());
 	    }
-     
-	    //System.out.println("==== Loaderreduce " + key + " " + toReturn.toString());
+	    if (debug)
+		System.out.println("==== Loaderreduce " + key + " " + toReturn.toString());
 	    context.write(key, new Text(toReturn.toString()));
 	}
     }
@@ -181,44 +214,46 @@ public class SmallWorld {
 	    throws IOException, InterruptedException {
 	    StringBuilder toReturn = new StringBuilder();
 	    StringBuilder updatedValue = new StringBuilder();
-	    boolean first = true;
+	    String[] reachable = null;
+	    boolean doSplitReachable = true;
 
 	    String line = value.toString();
-	    // list[0] is always the reachable list. list[1..n] is a triplet.
-	    String[] list = line.split(" ");
-
-	    updatedValue.append(list[0]);
-	    updatedValue.append(" ");
-
-	    for (int x = 1; x < list.length; x++) {
-		String[] kv = list[x].split(",");
-		if (kv[0].equals("T")) {
-		    String[] reachable = list[0].split(",");
-		    for (int y = 0; y < reachable.length; y++) {
-			long reach = Integer.parseInt(reachable[y]);
-			int dist = Integer.parseInt(kv[1]) + 1;
-			toReturn.append("-1 T,");
-			toReturn.append(dist);
-			toReturn.append(",");
-			toReturn.append(kv[2]);
-			context.write(new LongWritable (reach), new Text(toReturn.toString()));
-			toReturn = new StringBuilder();
-			allTraversed = false;
-		    }
-		    updatedValue.append("V,");
-		    updatedValue.append(kv[1]);
-		    updatedValue.append(",");
-		    updatedValue.append(kv[2]);
-		    updatedValue.append(" ");
+	    int pos = 0, ptr;
+	    while ((ptr = line.indexOf('T', pos)) >= 0) {
+		if (doSplitReachable) {
+		    reachable = line.substring(0, line.indexOf(' ',0)).split(",");
+		    doSplitReachable = false;
 		}
-		else {
-		    updatedValue.append(list[x]);
-		    updatedValue.append(" ");
+		// ptr points to "T,dist,start" get dist and start node
+		int ptr2 = line.indexOf(',',ptr+2);
+		int dist = Integer.parseInt(line.substring(ptr+2,ptr2)) + 1;
+		int ptr3 = line.indexOf(' ',ptr2+1);
+		int start;
+		if (ptr3 >= 0)
+		    start = Integer.parseInt(line.substring(ptr2+1, ptr3));
+		else
+		    start = Integer.parseInt(line.substring(ptr2+1));
+		// Do real traverse, emit the traverse
+		for (int y = 0; y < reachable.length; y++) {
+		    long reach = Integer.parseInt(reachable[y]);
+		    toReturn.append("-1 T,");
+		    toReturn.append(dist);
+		    toReturn.append(",");
+		    toReturn.append(start);
+		    context.write(new LongWritable (reach), new Text(toReturn.toString()));
+		    if (debug)
+			System.out.println("==== BFSMap " + reach + " " + toReturn);
+		    toReturn = new StringBuilder();
+		    // Mark allTraversed false since more traverse is needed
+		    allTraversed = false;
 		}
+		// Continue to search for the next (T,dist,start)
+		pos = ptr + 1;
 	    }
-	    // Propagate the original.
-	    context.write(key, new Text(updatedValue.toString()));
-	    //System.out.println("==== BFSMap " + key + " " + updatedValue);
+	    
+	    context.write(key, new Text(line.replace('T', 'V')));
+	    if (debug)
+		System.out.println("==== BFSMap " + key + " " + line.replace('T', 'V'));
         }
     }
 
@@ -228,68 +263,58 @@ public class SmallWorld {
 	public void reduce(LongWritable key, Iterable<Text> values,
 			   Context context)
 	    throws IOException, InterruptedException {
-	    String reachable = new String("");
-	    ArrayList<Long> traverseDistArray = new ArrayList<Long>();
-	    ArrayList<Long> traverseStartArray = new ArrayList<Long>();
-	    ArrayList<Long> visitedDistArray = new ArrayList<Long>();
-	    ArrayList<Long> visitedStartArray = new ArrayList<Long>();
-	    ArrayList<Long> visitedTagArray = new ArrayList<Long>();
 	    StringBuilder toReturn = new StringBuilder();
+	    ArrayList<String> newTravArray = new ArrayList<String>();
+	    // Two passes:
+	    // First pass finds the value without -1. It includes
+	    // the links and visited V,dist,start list
+	    // Second pass has to go through all -1 items and check
+	    // if same start node already reach this node.  Append
+	    // the T,dist,start only if the same start node appear.
 	    for (Text value : values) {
 		String line = value.toString();
-		String[] list = line.split(" ");
-		if (list[0].equals("-1")) {
-		    // traverse request
-		    String[] kv = list[1].split(",");
-		    long dist = Integer.parseInt(kv[1]);
-		    long start = Integer.parseInt(kv[2]);
-		    traverseDistArray.add(dist);
-		    traverseStartArray.add(start);
+		// Check if the first character is - "-1"
+		if (line.charAt(0) == '-') {
+		    newTravArray.add(line);
+		    continue;
 		}
-		else {
-		    // Decompose the regular reachable list and dist,start pairs
-		    reachable = list[0];
-		    for (int x = 1; x < list.length; x++) {
-			String[] kv = list[x].split(",");
-			Long dist = Long.parseLong(kv[1]);
-			Long start = Long.parseLong(kv[2]);
-			visitedDistArray.add(dist);
-			visitedStartArray.add(start);
-			visitedTagArray.add(new Long(0));
-		    }
-		}
+		toReturn.append(line);
 	    }
-	    for (int x = 0; x < traverseStartArray.size(); x++) {
+	    for (int x = 0; x < newTravArray.size(); x++) {
 		boolean found = false;
-		for (int y = 0; y < visitedStartArray.size(); y++) {
-		    if (visitedStartArray.get(y) == traverseStartArray.get(x)) {
-			found = true;
-			break;
+		String line = newTravArray.get(x);
+		// Check if the first character is - (-1 in the front)
+		if (line.charAt(0) == '-') {
+		    int pos, ptr, ptr2, length;
+		    String startToken;
+		    // 'start' node is the number after second ','
+		    ptr = line.indexOf(',', 0);
+		    ptr2 = line.indexOf(',', ptr+1);
+		    startToken = line.substring(ptr2);
+		    int startTokenLength = startToken.length();
+		    // Check if startToken is in the visited start node list
+		    pos = 0;
+		    while ((ptr = toReturn.indexOf(startToken, pos)) >= 0) {
+			// Since some node name is a substring of another,
+			// we have to make sure it matches exactly
+			if ((ptr + startTokenLength) >= toReturn.length() ||
+			    toReturn.charAt(ptr + startTokenLength) == ' ') {
+			    // do not add it since the same start node exists
+			    found = true;
+			    break;
+			}
+			pos = ptr + 1;
+		    }
+		    if (!found) {
+			// Append T,dist,start to the visited string
+			toReturn.append(" ");
+			toReturn.append(line.substring(3));
 		    }
 		}
-		if (!found) {
-		    // Insert the dist,start to visited list
-		    visitedDistArray.add(traverseDistArray.get(x));
-		    visitedStartArray.add(traverseStartArray.get(x));
-		    visitedTagArray.add(new Long(1));
-		}
-	    }
-	    // append reachable first
-	    toReturn.append(reachable);
-	    // append all dist,start pairs
-	    for (int y = 0; y < visitedStartArray.size(); y++) {
-		toReturn.append(" ");
-		if (visitedTagArray.get(y) == 1) {
-		    toReturn.append("T,");
-		}
-		else
-		    toReturn.append("V,");
-		toReturn.append(visitedDistArray.get(y));
-		toReturn.append(",");
-		toReturn.append(visitedStartArray.get(y));
 	    }
 	    context.write(key, new Text(toReturn.toString()));
-	    //System.out.println("==== BFSReduce " + key + " " + toReturn.toString());
+	    if (debug)
+		System.out.println("==== BFSReduce " + key + " " + toReturn.toString());
 	}
     }
 
@@ -320,8 +345,8 @@ public class SmallWorld {
 		int dist = Integer.parseInt(kv[1]);
 		int sourceNode = Integer.parseInt(kv[2]);
 		context.write(new LongWritable(dist), new LongWritable(sourceNode));
-	       
-		//System.out.println("==== HistMap " + dist + " " + sourceNode);
+		if (debug)
+		    System.out.println("==== HistMap " + dist + " " + sourceNode);
 	    }
 	}
     }
@@ -338,7 +363,8 @@ public class SmallWorld {
 		sum++;
 	    }
 	    context.write(key, new LongWritable (sum));
-	    //System.out.println("==== HistReduce final " + key + " " + sum);
+	    if (debug)
+		System.out.println("==== HistReduce final " + key + " " + sum);
 	}
     }
 
@@ -444,7 +470,7 @@ public class SmallWorld {
         job.setOutputValueClass(LongWritable.class);
 
         job.setMapperClass(HistMapper.class);
-//        job.setCombinerClass(Reducer.class);
+        job.setCombinerClass(Reducer.class);
         job.setReducerClass(HistReducer.class);
 
         job.setInputFormatClass(SequenceFileInputFormat.class);
